@@ -18,10 +18,9 @@ function main(params) {
 }
 
 function getDbs(cloudant) {
-    cloudant.getAllDbs().then((body) => {
+    cloudant.db.list().then((body) => {
         body.forEach((db) => {
             dbList.push(db);
         });
     }).catch((err) => { console.log(err); });
 }
-
