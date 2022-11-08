@@ -1,189 +1,170 @@
-import requests
+from django.shortcuts import render
+from django.http import HttpResponseRedirect, HttpResponse
+from django.contrib.auth.models import User
+from django.shortcuts import get_object_or_404, render, redirect
+from .models import CarModel
+from .restapis import get_dealer_by_id, get_dealers_from_cf, get_dealers_by_state, get_dealer_reviews_from_cf, post_request
+from django.contrib.auth import login, logout, authenticate
+from django.contrib import messages
+from datetime import datetime
+import logging
 import json
-import os
-from .models import CarDealer, DealerReview
-from requests.auth import HTTPBasicAuth
-from decouple import config
-from ibm_watson import NaturalLanguageUnderstandingV1
-from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
-from ibm_watson.natural_language_understanding_v1 import Features, SentimentOptions
+
+# Getting an instance of a logger
+logger = logging.getLogger(__name__)
 
 
-# Function for making HTTP GET requests
-def get_request(url, api_key=False, **kwargs):
-    print(f"GET from {url}")
-    if api_key:
-        # Basic authentication GET
-        try:
-            response = requests.get(url, headers={'Content-Type': 'application/json'},
-                                    params=kwargs, auth=HTTPBasicAuth('apikey', api_key))
-        except:
-            print("An error occurred while making GET request. ")
+# View to render the index page with a list of dealerships
+def get_dealerships(request):
+    if request.method == "GET":
+        context = {}
+        url = "https://9bebcb01.eu-de.apigw.appdomain.cloud/api/dealership"
+        # Get dealers from the Cloudant DB
+        context["dealerships"] = get_dealers_from_cf(url)
+
+        # dealer_names = ' '.join([dealer.short_name for dealer in context["dealerships"]])
+        # return HttpResponse(dealer_names)
+
+        return render(request, 'djangoapp/index.html', context)
+
+# View to render a static about page
+def about(request):
+    context = {}
+    if request.method == "GET":
+        return render(request, 'djangoapp/about.html', context)
+
+
+# View to return a static contact page
+def contact(request):
+    context = {}
+    if request.method == "GET":
+        return render(request, 'djangoapp/contact.html', context)
+
+
+# View to handle sign in request
+def login_request(request):
+    context = {}
+    if request.method == "POST":
+        username = request.POST['username']
+        password = request.POST['psw']
+        user = authenticate(username=username, password=password)
+        if user is not None:
+            login(request, user)
+            return redirect('djangoapp:index')
+        else:
+            context['message'] = "Invalid username or password."
+            return render(request, 'djangoapp/login.html', context)
     else:
-        # No authentication GET
+        return render(request, 'djangoapp/login.html', context)
+
+
+# View to handle sign out request
+def logout_request(request):
+    # Get the user object based on session id in request
+    print("Logging out `{}`...".format(request.user.username))
+    # Logout user in the request
+    logout(request)
+    # Redirect user back to course list view
+    return redirect('djangoapp:index')
+
+
+# View to handle sign up request
+def registration_request(request):
+    context = {}
+    # If it is a GET request, just render the registration page
+    if request.method == 'GET':
+        return render(request, 'djangoapp/registration.html', context)
+    # If it is a POST request
+    elif request.method == 'POST':
+        # Get user information from request.POST
+        username = request.POST['username']
+        password = request.POST['psw']
+        first_name = request.POST['firstname']
+        last_name = request.POST['lastname']
+        user_exist = False
         try:
-            response = requests.get(url, headers={'Content-Type': 'application/json'},
-                                    params=kwargs)
+            # Check if user already exists
+            User.objects.get(username=username)
+            user_exist = True
         except:
-            print("An error occurred while making GET request. ")
-
-    # Retrieving the response status code and content
-    status_code = response.status_code
-    print(f"With status {status_code}")
-    json_data = json.loads(response.text)
-
-    return json_data
-
-
-# Function for making HTTP POST requests
-def post_request(url, json_payload, **kwargs):
-    print(f"POST to {url}")
-    try:
-        response = requests.post(url, params=kwargs, json=json_payload)
-    except:
-        print("An error occurred while making POST request. ")
-    status_code = response.status_code
-    print(f"With status {status_code}")
-
-    return response
+            # If not, simply log this is a new user
+            logger.debug("{} is new user".format(username))
+        # If it is a new user
+        if not user_exist:
+            # Create user in auth_user table
+            user = User.objects.create_user(username=username, first_name=first_name, last_name=last_name,
+                                            password=password)
+            # Login the user and redirect to course list page
+            login(request, user)
+            return redirect("/djangoapp/")
+        else:
+            return render(request, 'djangoapp/registration.html', context)
 
 
-# Gets all dealers from the Cloudant DB with the Cloud Function get-dealerships
-def get_dealers_from_cf(url):
-    results = []
-    json_result = get_request(url)
-    # Retrieve the dealer data from the response
-    dealers = json_result["body"]["rows"]
-    # For each dealer in the response
-    for dealer in dealers:
-        # Get its data in `doc` object
-        dealer_doc = dealer["doc"]
-        # Create a CarDealer object with values in `doc` object
-        dealer_obj = CarDealer(address=dealer_doc["address"], city=dealer_doc["city"], full_name=dealer_doc["full_name"],
-                               id=dealer_doc["id"], lat=dealer_doc["lat"], long=dealer_doc["long"],
-                               short_name=dealer_doc["short_name"],
-                               st=dealer_doc["st"], state=dealer_doc["state"], zip=dealer_doc["zip"])
-        results.append(dealer_obj)
+# View to render the reviews of a dealer
+def get_dealer_details(request, dealer_id):
+    context = {}
+    if request.method == "GET":
+        url = 'https://9bebcb01.eu-de.apigw.appdomain.cloud/api/review'
+        reviews = get_dealer_reviews_from_cf(url, dealer_id=dealer_id)
+        context = {
+            "reviews":  reviews, 
+            "dealer_id": dealer_id
+        }
 
-    return results
+        return render(request, 'djangoapp/dealer_details.html', context)
 
 
-# Gets a single dealer from the Cloudant DB with the Cloud Function get-dealerships
-# Requires the dealer_id parameter with only a single value
-def get_dealer_by_id(url, dealer_id):
-    # Call get_request with the dealer_id param
-    json_result = get_request(url, dealerId=dealer_id)
+# View to submit a new review
+def add_review(request, dealer_id):
+    # User must be logged in before posting a review
+    if request.user.is_authenticated:
+        # GET request renders the page with the form for filling out a review
+        if request.method == "GET":
+            url = f"https://5b93346d.us-south.apigw.appdomain.cloud/dealerships/dealer-get?dealerId={dealer_id}"
+            # Get dealer details from the API
+            context = {
+                "cars": CarModel.objects.all(),
+                "dealer": get_dealer_by_id(url, dealer_id=dealer_id),
+            }
+            return render(request, 'djangoapp/add_review.html', context)
 
-    # Create a CarDealer object from response
-    dealer = json_result["entries"][0]
-    dealer_obj = CarDealer(address=dealer["address"], city=dealer["city"], full_name=dealer["full_name"],
-                           id=dealer["id"], lat=dealer["lat"], long=dealer["long"],
-                           short_name=dealer["short_name"],
-                           st=dealer["st"], state=dealer["state"], zip=dealer["zip"])
+        # POST request posts the content in the review submission form to the Cloudant DB using the post_review Cloud Function
+        if request.method == "POST":
+            form = request.POST
+            review = dict()
+            review["name"] = f"{request.user.first_name} {request.user.last_name}"
+            review["dealership"] = dealer_id
+            review["review"] = form["content"]
+            review["purchase"] = form.get("purchasecheck")
+            if review["purchase"]:
+                review["purchase_date"] = datetime.strptime(form.get("purchasedate"), "%m/%d/%Y").isoformat()
+            car = CarModel.objects.get(pk=form["car"])
+            review["car_make"] = car.car_make.name
+            review["car_model"] = car.name
+            review["car_year"] = car.year
+            
+            # If the user bought the car, get the purchase date
+            if form.get("purchasecheck"):
+                review["purchase_date"] = datetime.strptime(form.get("purchasedate"), "%m/%d/%Y").isoformat()
+            else: 
+                review["purchase_date"] = None
 
-    return dealer_obj
+            url = "https://9bebcb01.eu-de.apigw.appdomain.cloud/api/review"  # API Cloud Function route
+            json_payload = {"review": review}  # Create a JSON payload that contains the review data
 
+            # Performing a POST request with the review
+            result = post_request(url, json_payload, dealerId=dealer_id)
+            if int(result.status_code) == 200:
+                print("Review posted successfully.")
 
-# Gets all dealers in the specified state from the Cloudant DB with the Cloud Function get-dealerships
-def get_dealers_by_state(url, state):
-    results = []
-    # Call get_request with the state param
-    json_result = get_request(url, state=state)
-    dealers = json_result["body"]["docs"]
-    # For each dealer in the response
-    for dealer in dealers:
-        # Create a CarDealer object with values in `doc` object
-        dealer_obj = CarDealer(address=dealer["address"], city=dealer["city"], full_name=dealer["full_name"],
-                               id=dealer["id"], lat=dealer["lat"], long=dealer["long"],
-                               short_name=dealer["short_name"],
-                               st=dealer["st"], state=dealer["state"], zip=dealer["zip"])
-        results.append(dealer_obj)
+            # After posting the review the user is redirected back to the dealer details page
+            return redirect("djangoapp:dealer_details", dealer_id=dealer_id)
 
-    return results
-
-
-# Gets all dealer reviews for a specified dealer from the Cloudant DB
-# Uses the Cloud Function get_reviews
-def get_dealer_reviews_from_cf(url, dealer_id):
-    results = []
-    # Perform a GET request with the specified dealer id
-    json_result = get_request(url, dealerId=dealer_id)
-
-    if json_result:
-        # Get all review data from the response
-        reviews = json_result["body"]["data"]["docs"]
-        # For every review in the response
-        for review in reviews:
-            # Create a DealerReview object from the data
-            # These values must be present
-            review_content = review["review"]
-            id = review["_id"]
-            name = review["name"]
-            purchase = review["purchase"]
-            dealership = review["dealership"]
-
-            try:
-                # These values may be missing
-                car_make = review["car_make"]
-                car_model = review["car_model"]
-                car_year = review["car_year"]
-                purchase_date = review["purchase_date"]
-
-                # Creating a review object
-                review_obj = DealerReview(dealership=dealership, id=id, name=name, 
-                                          purchase=purchase, review=review_content, car_make=car_make, 
-                                          car_model=car_model, car_year=car_year, purchase_date=purchase_date
-                                          )
-
-            except KeyError:
-                print("Something is missing from this review. Using default values.")
-                # Creating a review object with some default values
-                review_obj = DealerReview(
-                    dealership=dealership, id=id, name=name, purchase=purchase, review=review_content)
-
-            # Analysing the sentiment of the review object's review text and saving it to the object attribute "sentiment"
-            review_obj.sentiment = analyze_review_sentiments(review_obj.review)
-            print(f"sentiment: {review_obj.sentiment}")
-
-            # Saving the review object to the list of results
-            results.append(review_obj)
-
-    return results
-
-
-# Calls the Watson NLU API and analyses the sentiment of a review
-def analyze_review_sentiments(review_text):
-    # Watson NLU configuration
-    try:
-        if os.environ['env_type'] == 'PRODUCTION':
-            url = os.environ['WATSON_NLU_URL']
-            api_key = os.environ["WATSON_NLU_API_KEY"]
-    except KeyError:
-        url = config('WATSON_NLU_URL')
-        api_key = config('WATSON_NLU_API_KEY')
-
-    version = '2021-08-01'
-    authenticator = IAMAuthenticator(api_key)
-    nlu = NaturalLanguageUnderstandingV1(
-        version=version, authenticator=authenticator)
-    nlu.set_service_url(url)
-
-    # get sentiment of the review
-    try:
-        response = nlu.analyze(text=review_text, features=Features(
-            sentiment=SentimentOptions())).get_result()
-        print(json.dumps(response))
-        # sentiment_score = str(response["sentiment"]["document"]["score"])
-        sentiment_label = response["sentiment"]["document"]["label"]
-    except:
-        print("Review is too short for sentiment analysis. Assigning default sentiment value 'neutral' instead")
-        sentiment_label = "neutral"
-
-    # print(sentiment_score)
-    print(sentiment_label)
-
-    return sentiment_label
-
+    else:
+        # If user isn't logged in, redirect to login page
+        print("User must be authenticated before posting a review. Please log in.")
+        return redirect("/djangoapp/login")
 # import requests
 # import json
 # import related models here
